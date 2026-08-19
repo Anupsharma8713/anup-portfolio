@@ -21,6 +21,7 @@ function sign(value){return crypto.createHmac("sha256",TOKEN_SECRET).update(valu
 function makeToken(){const payload=Date.now()+":"+(Date.now()+24*60*60*1000);return Buffer.from(payload).toString("base64url")+"."+sign(payload)}
 function validToken(token){try{const [b,s]=String(token||"").split(".");const payload=Buffer.from(b,"base64url").toString();const expected=sign(payload);if(!s||s.length!==expected.length||!crypto.timingSafeEqual(Buffer.from(s),Buffer.from(expected)))return false;return Number(payload.split(":")[1])>Date.now()}catch{return false}}
 function requireSupabase(){if(!supabase)throw new Error("Supabase environment variables are missing")}
+function publicProject(p){return {id:p.id,type:p.type,title:p.title,category:p.category,tools:p.tools,description:p.description,duration:p.duration,format:p.format,published:p.published,videoUrl:p.video_url,modelUrl:p.model_url,thumbnail:p.thumbnail_url,created:p.created}}
 
 const storage=multer.diskStorage({
   destination:(req,file,cb)=>{
@@ -52,7 +53,7 @@ app.get("/api/projects",async(req,res)=>{
     requireSupabase();
     const {data,error}=await supabase.from("projects").select("*").order("created",{ascending:false});
     if(error)throw error;
-    res.json(data||[]);
+    res.json((data||[]).map(publicProject));
   }catch(e){console.error(e);res.status(500).json({error:"Could not load projects"});}
 });
 
@@ -81,7 +82,7 @@ app.post("/api/projects",auth,upload.fields([{name:"video",maxCount:1},{name:"mo
     const p={type:b.type,title:b.title,category:b.category||"",tools:b.tools||"",description:b.description||"",duration:b.duration||"",format:b.format||"",published:true,video_url:videoUrl,model_url:modelUrl,thumbnail_url:thumbnailUrl};
     const {data,error}=await supabase.from("projects").insert(p).select("*").single();
     if(error)throw error;
-    res.json({id:data.id,type:data.type,title:data.title,category:data.category,tools:data.tools,description:data.description,duration:data.duration,format:data.format,published:data.published,videoUrl:data.video_url,modelUrl:data.model_url,thumbnail:data.thumbnail_url,created:data.created});
+    res.json(publicProject(data));
   }catch(e){
     console.error(e);
     res.status(500).json({error:"Upload failed: "+(e.message||"unknown error")});
