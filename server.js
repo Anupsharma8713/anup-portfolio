@@ -4,7 +4,6 @@ const fs=require("fs");
 const path=require("path");
 const crypto=require("crypto");
 const {createClient}=require("@supabase/supabase-js");
-
 const app=express();
 const PORT=process.env.PORT||3000;
 const ADMIN_PASSWORD=process.env.ADMIN_PASSWORD||"anup123";
@@ -12,134 +11,33 @@ const TOKEN_SECRET=process.env.TOKEN_SECRET||ADMIN_PASSWORD+"-portfolio-secret";
 const SUPABASE_URL=process.env.SUPABASE_URL;
 const SUPABASE_KEY=process.env.SUPABASE_SECRET_KEY;
 const supabase=SUPABASE_URL&&SUPABASE_KEY?createClient(SUPABASE_URL,SUPABASE_KEY):null;
-
-const TMP="/tmp/anup-portfolio";
-const UP=path.join(TMP,"uploads");
+const PUBLIC=path.join(__dirname,"public");
+const TMP="/tmp/anup-portfolio";const UP=path.join(TMP,"uploads");
 for(const d of [UP,path.join(UP,"videos"),path.join(UP,"models"),path.join(UP,"images")])fs.mkdirSync(d,{recursive:true});
-
-function sign(value){return crypto.createHmac("sha256",TOKEN_SECRET).update(value).digest("hex")}
-function makeToken(){const payload=Date.now()+":"+(Date.now()+24*60*60*1000);return Buffer.from(payload).toString("base64url")+"."+sign(payload)}
-function validToken(token){try{const [b,s]=String(token||"").split(".");const payload=Buffer.from(b,"base64url").toString();const expected=sign(payload);if(!s||s.length!==expected.length||!crypto.timingSafeEqual(Buffer.from(s),Buffer.from(expected)))return false;return Number(payload.split(":")[1])>Date.now()}catch{return false}}
-function requireSupabase(){if(!supabase)throw new Error("Supabase environment variables are missing")}
-function publicProject(p){return {id:p.id,type:p.type,title:p.title,category:p.category,tools:p.tools,description:p.description,duration:p.duration,format:p.format,published:p.published,videoUrl:p.video_url,modelUrl:p.model_url,thumbnail:p.thumbnail_url,created:p.created}}
-
-const storage=multer.diskStorage({
-  destination:(req,file,cb)=>{
-    const type=req.body.type;
-    cb(null,type==="video"?path.join(UP,"videos"):file.fieldname==="thumbnail"?path.join(UP,"images"):path.join(UP,"models"));
-  },
-  filename:(req,file,cb)=>{
-    const ext=path.extname(file.originalname).toLowerCase();
-    cb(null,Date.now()+"-"+crypto.randomBytes(5).toString("hex")+ext);
-  }
-});
+function sign(v){return crypto.createHmac("sha256",TOKEN_SECRET).update(v).digest("hex")}
+function makeToken(){const p=Date.now()+":"+(Date.now()+86400000);return Buffer.from(p).toString("base64url")+"."+sign(p)}
+function validToken(t){try{const[b,s]=String(t||"").split(".");const p=Buffer.from(b,"base64url").toString(),e=sign(p);return s&&s.length===e.length&&crypto.timingSafeEqual(Buffer.from(s),Buffer.from(e))&&Number(p.split(":")[1])>Date.now()}catch{return false}}
+function auth(req,res,next){if(!validToken((req.headers.authorization||"").replace("Bearer ","")))return res.status(401).json({error:"Please login again"});next()}
+function requireSupabase(){if(!supabase)throw Error("Supabase environment variables are missing")}
+function publicProject(p){return{id:p.id,type:p.type,title:p.title,category:p.category,tools:p.tools,description:p.description,duration:p.duration,format:p.format,published:p.published,videoUrl:p.video_url,modelUrl:p.model_url,thumbnail:p.thumbnail_url,resumeUrl:p.resume_url,created:p.created}}
+function obj(url,bucket){const m=`/${bucket}/`,i=String(url||"").indexOf(m);return i>=0?url.slice(i+m.length):null}
+const storage=multer.diskStorage({destination:(req,file,cb)=>cb(null,file.fieldname==="thumbnail"?path.join(UP,"images"):req.body.type==="video"?path.join(UP,"videos"):path.join(UP,"models")),filename:(req,file,cb)=>cb(null,Date.now()+"-"+crypto.randomBytes(5).toString("hex")+path.extname(file.originalname).toLowerCase())});
 const upload=multer({storage,limits:{fileSize:1024*1024*1024}});
-
 app.use(express.json());
-app.use(express.static(path.join(__dirname,"public")));
-
-app.post("/api/login",(req,res)=>{
-  if(req.body.password!==ADMIN_PASSWORD)return res.status(401).json({error:"Wrong password"});
-  res.json({token:makeToken()});
-});
-function auth(req,res,next){
-  const t=(req.headers.authorization||"").replace("Bearer ","");
-  if(!validToken(t))return res.status(401).json({error:"Please login again"});
-  next();
-}
-
-app.get("/api/projects",async(req,res)=>{
-  try{
-    requireSupabase();
-    const {data,error}=await supabase.from("projects").select("*").order("created",{ascending:false});
-    if(error)throw error;
-    res.json((data||[]).map(publicProject));
-  }catch(e){console.error(e);res.status(500).json({error:"Could not load projects"});}
-});
-
-app.post("/api/profile",auth,async(req,res)=>{
-  try{
-    requireSupabase();
-    const imageUrl=String(req.body?.image_url||"").trim();
-    if(!imageUrl)return res.status(400).json({error:"Profile image required"});
-    const {data:old}=await supabase.from("projects").select("*").eq("type","profile");
-    for(const p of old||[]){
-      const url=p.thumbnail_url;
-      if(url){const marker="/portfolio-thumbnails/";const i=url.indexOf(marker);if(i>=0){const objectPath=url.slice(i+marker.length);try{await supabase.storage.from("portfolio-thumbnails").remove([objectPath])}catch{}}}
-    }
-    await supabase.from("projects").delete().eq("type","profile");
-    const {data,error}=await supabase.from("projects").insert({type:"profile",title:"Profile Photo",published:true,thumbnail_url:imageUrl}).select("*").single();
-    if(error)throw error;
-    res.json(publicProject(data));
-  }catch(e){console.error(e);res.status(500).json({error:"Could not save profile image: "+(e.message||"unknown error")});}
-});
-
-app.post("/api/upload-url",auth,async(req,res)=>{
-  try{
-    requireSupabase();
-    const {type,filename}=req.body||{};
-    const bucket=type==="video"?"portfolio-videos":type==="3d"?"portfolio-models":type==="thumbnail"?"portfolio-thumbnails":null;
-    if(!bucket||!filename)return res.status(400).json({error:"Invalid upload request"});
-    const ext=path.extname(path.basename(filename)).toLowerCase();
-    const objectPath=Date.now()+"-"+crypto.randomBytes(8).toString("hex")+ext;
-    const {data,error}=await supabase.storage.from(bucket).createSignedUploadUrl(objectPath);
-    if(error)throw error;
-    const publicUrl=supabase.storage.from(bucket).getPublicUrl(objectPath).data.publicUrl;
-    res.json({bucket,path:objectPath,token:data.token,signedUrl:data.signedUrl,publicUrl});
-  }catch(e){
-    console.error(e);
-    res.status(500).json({error:"Could not create upload URL: "+(e.message||"unknown error")});
-  }
-});
-
-async function uploadToBucket(bucket,file){
-  if(!file)return null;
-  const objectPath=Date.now()+"-"+crypto.randomBytes(6).toString("hex")+path.extname(file.originalname).toLowerCase();
-  const body=fs.readFileSync(file.path);
-  const {error}=await supabase.storage.from(bucket).upload(objectPath,body,{contentType:file.mimetype||"application/octet-stream",upsert:false});
-  if(error)throw error;
-  return supabase.storage.from(bucket).getPublicUrl(objectPath).data.publicUrl;
-}
-
-app.post("/api/projects",auth,upload.fields([{name:"video",maxCount:1},{name:"model",maxCount:1},{name:"thumbnail",maxCount:1}]),async(req,res)=>{
-  const files=req.files||{};
-  try{
-    requireSupabase();
-    const b=req.body;
-    if(!b.title)return res.status(400).json({error:"Title required"});
-    if(b.type==="video"&&!b.video_url&&!files.video?.[0])return res.status(400).json({error:"Video file required"});
-    if(b.type==="3d"&&!b.model_url&&!files.model?.[0])return res.status(400).json({error:"3D model file required"});
-
-    const videoUrl=b.video_url||(b.type==="video"?await uploadToBucket("portfolio-videos",files.video?.[0]):null);
-    const modelUrl=b.model_url||(b.type==="3d"?await uploadToBucket("portfolio-models",files.model?.[0]):null);
-    const thumbnailUrl=b.thumbnail_url||(files.thumbnail?.[0]?await uploadToBucket("portfolio-thumbnails",files.thumbnail[0]):null);
-
-    const p={type:b.type,title:b.title,category:b.category||"",tools:b.tools||"",description:b.description||"",duration:b.duration||"",format:b.format||"",published:true,video_url:videoUrl,model_url:modelUrl,thumbnail_url:thumbnailUrl};
-    const {data,error}=await supabase.from("projects").insert(p).select("*").single();
-    if(error)throw error;
-    res.json(publicProject(data));
-  }catch(e){
-    console.error(e);
-    res.status(500).json({error:"Upload failed: "+(e.message||"unknown error")});
-  }finally{
-    for(const group of Object.values(files))for(const file of group||[])try{fs.unlinkSync(file.path)}catch{}
-  }
-});
-
-app.delete("/api/projects/:id",auth,async(req,res)=>{
-  try{
-    requireSupabase();
-    const {data:p,error:getError}=await supabase.from("projects").select("*").eq("id",req.params.id).single();
-    if(getError||!p)return res.status(404).json({error:"Not found"});
-    for(const [url,bucket] of [[p.video_url,"portfolio-videos"],[p.model_url,"portfolio-models"],[p.thumbnail_url,"portfolio-thumbnails"]]){
-      if(url){const marker=`/${bucket}/`;const i=url.indexOf(marker);if(i>=0){const objectPath=url.slice(i+marker.length);await supabase.storage.from(bucket).remove([objectPath]);}}
-    }
-    const {error}=await supabase.from("projects").delete().eq("id",req.params.id);
-    if(error)throw error;
-    res.json({ok:true});
-  }catch(e){console.error(e);res.status(500).json({error:"Delete failed"});}
-});
-
-app.get("/admin",(req,res)=>res.sendFile(path.join(__dirname,"public","admin.html")));
+app.post("/api/login",(req,res)=>{if(req.body.password!==ADMIN_PASSWORD)return res.status(401).json({error:"Wrong password"});res.json({token:makeToken()})});
+app.get("/api/projects",async(req,res)=>{try{requireSupabase();const{data,error}=await supabase.from("projects").select("*").order("created",{ascending:false});if(error)throw error;res.json((data||[]).map(publicProject))}catch(e){res.status(500).json({error:"Could not load projects"})}});
+app.post("/api/profile",auth,async(req,res)=>{try{requireSupabase();const u=String(req.body?.image_url||"").trim();if(!u)return res.status(400).json({error:"Profile image required"});const{data:old}=await supabase.from("projects").select("*").eq("type","profile");for(const p of old||[]){const o=obj(p.thumbnail_url,"portfolio-thumbnails");if(o)try{await supabase.storage.from("portfolio-thumbnails").remove([o])}catch{}}await supabase.from("projects").delete().eq("type","profile");const{data,error}=await supabase.from("projects").insert({type:"profile",title:"Profile Photo",published:true,thumbnail_url:u}).select("*").single();if(error)throw error;res.json(publicProject(data))}catch(e){res.status(500).json({error:"Could not save profile image: "+e.message})}});
+app.post("/api/upload-url",auth,async(req,res)=>{try{requireSupabase();const{type,filename}=req.body||{};const bucket=type==="video"?"portfolio-videos":type==="3d"?"portfolio-models":type==="thumbnail"?"portfolio-thumbnails":type==="resume"?"portfolio-resumes":null;if(!bucket||!filename)return res.status(400).json({error:"Invalid upload request"});const ext=path.extname(path.basename(filename)).toLowerCase();const objectPath=Date.now()+"-"+crypto.randomBytes(8).toString("hex")+ext;const{data,error}=await supabase.storage.from(bucket).createSignedUploadUrl(objectPath);if(error)throw error;res.json({bucket,path:objectPath,token:data.token,signedUrl:data.signedUrl,publicUrl:supabase.storage.from(bucket).getPublicUrl(objectPath).data.publicUrl})}catch(e){res.status(500).json({error:"Could not create upload URL: "+e.message})}});
+app.post("/api/projects",auth,upload.fields([{name:"video",maxCount:1},{name:"model",maxCount:1},{name:"thumbnail",maxCount:1}]),async(req,res)=>{const f=req.files||{};try{requireSupabase();const b=req.body;if(!b.title)return res.status(400).json({error:"Title required"});const vu=b.video_url||(b.type==="video"&&f.video?.[0]?await put("portfolio-videos",f.video[0]):null);const mu=b.model_url||(b.type==="3d"&&f.model?.[0]?await put("portfolio-models",f.model[0]):null);const tu=b.thumbnail_url||(f.thumbnail?.[0]?await put("portfolio-thumbnails",f.thumbnail[0]):null);const p={type:b.type,title:b.title,category:b.category||"",tools:b.tools||"",description:b.description||"",duration:b.duration||"",format:b.format||"",published:true,video_url:vu,model_url:mu,thumbnail_url:tu};const{data,error}=await supabase.from("projects").insert(p).select("*").single();if(error)throw error;res.json(publicProject(data))}catch(e){res.status(500).json({error:"Upload failed: "+e.message})}finally{for(const g of Object.values(f))for(const x of g||[])try{fs.unlinkSync(x.path)}catch{}}});
+async function put(bucket,file){const p=Date.now()+"-"+crypto.randomBytes(6).toString("hex")+path.extname(file.originalname).toLowerCase();const{error}=await supabase.storage.from(bucket).upload(p,fs.readFileSync(file.path),{contentType:file.mimetype||"application/octet-stream",upsert:false});if(error)throw error;return supabase.storage.from(bucket).getPublicUrl(p).data.publicUrl}
+app.get("/api/resume",async(req,res)=>{try{requireSupabase();const{data,error}=await supabase.from("projects").select("id,title,resume_url,created").eq("type","resume").eq("published",true).order("created",{ascending:false}).limit(1).maybeSingle();if(error)throw error;if(!data)return res.status(404).json({error:"Resume not uploaded yet"});res.json({id:data.id,title:data.title||"Resume",resumeUrl:data.resume_url,created:data.created})}catch(e){res.status(500).json({error:"Could not load resume"})}});
+app.post("/api/resume",auth,async(req,res)=>{try{requireSupabase();const u=String(req.body?.resume_url||"").trim(),title=String(req.body?.title||"Anup Kumar Sharma — Resume").trim();if(!u)return res.status(400).json({error:"Resume URL required"});const{data:old}=await supabase.from("projects").select("*").eq("type","resume");for(const x of old||[]){const o=obj(x.resume_url,"portfolio-resumes");if(o)try{await supabase.storage.from("portfolio-resumes").remove([o])}catch{}}await supabase.from("projects").delete().eq("type","resume");const{data,error}=await supabase.from("projects").insert({type:"resume",title,category:"Resume",published:true,resume_url:u}).select("*").single();if(error)throw error;res.json(publicProject(data))}catch(e){res.status(500).json({error:"Could not publish resume: "+e.message})}});
+app.delete("/api/resume",auth,async(req,res)=>{try{requireSupabase();const{data:old}=await supabase.from("projects").select("*").eq("type","resume");for(const x of old||[]){const o=obj(x.resume_url,"portfolio-resumes");if(o)try{await supabase.storage.from("portfolio-resumes").remove([o])}catch{}}const{error}=await supabase.from("projects").delete().eq("type","resume");if(error)throw error;res.json({ok:true})}catch(e){res.status(500).json({error:"Could not delete resume"})}});
+app.get("/api/resume/download",async(req,res)=>{try{requireSupabase();const{data,error}=await supabase.from("projects").select("resume_url").eq("type","resume").eq("published",true).order("created",{ascending:false}).limit(1).maybeSingle();if(error)throw error;if(!data?.resume_url)return res.status(404).send("Resume not uploaded yet");res.redirect(data.resume_url)}catch(e){res.status(500).send("Could not open resume")}});
+function adminPage(h){const panel=`<div class="panel" id="resumePanel"><h2>Resume</h2><p class="muted">Upload, replace or delete your latest resume PDF.</p><div class="grid"><div><label>Resume Title</label><input id="resumeTitle" value="Anup Kumar Sharma — Resume"></div><div><label>Resume PDF</label><input id="resumeFile" type="file" accept="application/pdf,.pdf"></div></div><br><button id="resumeUpload" class="btn primary">UPLOAD &amp; PUBLISH RESUME</button> <button id="resumeDelete" class="btn">DELETE RESUME</button><div id="resumeCurrent" class="muted" style="margin-top:14px">Checking...</div><div id="resumeProg" class="progress-wrap"><div class="progress-top"><span>Uploading resume...</span><strong id="resumePct">0%</strong></div><div class="progress-bar"><div id="resumeFill" class="progress-fill"></div></div><div class="progress-meta"><span id="resumeLoaded">0 MB / 0 MB</span><span id="resumeStatus">Preparing...</span></div></div></div>`;const js=`<script>(async()=>{const $=x=>document.getElementById(x),tok=()=>localStorage.getItem('anup_token'),load=async()=>{let r=await fetch('/api/resume');if(r.ok){let d=await r.json();$('resumeCurrent').innerHTML='Current: <a href="'+d.resumeUrl+'" target="_blank" style="color:#b56cff">'+d.title+'</a>'}else $('resumeCurrent').textContent='No resume uploaded yet.'};$('resumeUpload').onclick=async()=>{let f=$('resumeFile').files[0];if(!f)return alert('Resume PDF choose karo');let b=$('resumeUpload');b.disabled=true;try{let r=await fetch('/api/upload-url',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+tok()},body:JSON.stringify({type:'resume',filename:f.name})}),i=await r.json();if(!r.ok)throw Error(i.error);await new Promise((ok,no)=>{let x=new XMLHttpRequest();x.open('PUT',i.signedUrl);x.setRequestHeader('Content-Type','application/pdf');x.upload.onprogress=e=>{if(e.lengthComputable){let p=Math.round(e.loaded/e.total*100);$('resumePct').textContent=p+'%';$('resumeFill').style.width=p+'%';$('resumeLoaded').textContent=(e.loaded/1048576).toFixed(1)+' MB / '+(e.total/1048576).toFixed(1)+' MB'}};x.onload=()=>x.status>=200&&x.status<300?ok():no(Error('Upload failed'));x.onerror=()=>no(Error('Network/CORS error'));x.send(f)});r=await fetch('/api/resume',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+tok()},body:JSON.stringify({title:$('resumeTitle').value,resume_url:i.publicUrl})});let d=await r.json();if(!r.ok)throw Error(d.error);alert('Resume published ✓');load()}catch(e){alert(e.message)}finally{b.disabled=false}};$('resumeDelete').onclick=async()=>{if(!confirm('Delete current resume?'))return;let r=await fetch('/api/resume',{method:'DELETE',headers:{Authorization:'Bearer '+tok()}}),d=await r.json();if(!r.ok)return alert(d.error);alert('Resume deleted ✓');load()};load()})();</script>`;return h.replace('<div class="panel"><h2>Published Projects</h2>',panel+'<div class="panel"><h2>Published Projects</h2>').replace('</body>',js+'</body>')}
+app.get("/",(req,res)=>{try{let h=fs.readFileSync(path.join(PUBLIC,"index.html"),"utf8");h=h.replace('<a class="btn ghost" href="#contact">Let\'s Collaborate →</a>','<a id="resumeDownloadBtn" class="btn ghost" href="/api/resume/download">Download Resume ↓</a>');h=h.replace('</body>',`<script>(async()=>{try{let r=await fetch('/api/resume'),d=await r.json(),a=document.getElementById('resumeDownloadBtn');if(r.ok&&a){a.href=d.resumeUrl;a.target='_blank';a.setAttribute('download','Anup-Kumar-Sharma-Resume.pdf')}else if(a)a.style.display='none'}catch{let a=document.getElementById('resumeDownloadBtn');if(a)a.style.display='none'}})();</script></body>`);res.type('html').send(h)}catch(e){res.status(500).send('Could not load portfolio')}});
+app.get("/admin",(req,res)=>{try{res.type('html').send(adminPage(fs.readFileSync(path.join(PUBLIC,"admin.html"),"utf8')))}catch(e){res.status(500).send('Could not load admin')}});
+app.delete("/api/projects/:id",auth,async(req,res)=>{try{requireSupabase();const{data:p,error:getError}=await supabase.from("projects").select("*").eq("id",req.params.id).single();if(getError||!p)return res.status(404).json({error:"Not found"});for(const[url,b]of[[p.video_url,"portfolio-videos"],[p.model_url,"portfolio-models"],[p.thumbnail_url,"portfolio-thumbnails"]]){const o=obj(url,b);if(o)await supabase.storage.from(b).remove([o])}const{error}=await supabase.from("projects").delete().eq("id",req.params.id);if(error)throw error;res.json({ok:true})}catch(e){res.status(500).json({error:"Delete failed"})}});
+app.use(express.static(PUBLIC));
 if(require.main===module)app.listen(PORT,()=>console.log(`Portfolio running at http://localhost:${PORT}`));
 module.exports=app;
