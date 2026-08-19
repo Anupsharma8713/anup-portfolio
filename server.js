@@ -57,6 +57,26 @@ app.get("/api/projects",async(req,res)=>{
   }catch(e){console.error(e);res.status(500).json({error:"Could not load projects"});}
 });
 
+// Creates a short-lived signed URL so large files go directly from the browser to Supabase.
+// This avoids Vercel/serverless request-body limits for large videos and 3D files.
+app.post("/api/upload-url",auth,async(req,res)=>{
+  try{
+    requireSupabase();
+    const {type,filename}=req.body||{};
+    const bucket=type==="video"?"portfolio-videos":type==="3d"?"portfolio-models":type==="thumbnail"?"portfolio-thumbnails":null;
+    if(!bucket||!filename)return res.status(400).json({error:"Invalid upload request"});
+    const ext=path.extname(path.basename(filename)).toLowerCase();
+    const objectPath=Date.now()+"-"+crypto.randomBytes(8).toString("hex")+ext;
+    const {data,error}=await supabase.storage.from(bucket).createSignedUploadUrl(objectPath);
+    if(error)throw error;
+    const publicUrl=supabase.storage.from(bucket).getPublicUrl(objectPath).data.publicUrl;
+    res.json({bucket,path:objectPath,token:data.token,signedUrl:data.signedUrl,publicUrl});
+  }catch(e){
+    console.error(e);
+    res.status(500).json({error:"Could not create upload URL: "+(e.message||"unknown error")});
+  }
+});
+
 async function uploadToBucket(bucket,file){
   if(!file)return null;
   const objectPath=Date.now()+"-"+crypto.randomBytes(6).toString("hex")+path.extname(file.originalname).toLowerCase();
@@ -72,12 +92,12 @@ app.post("/api/projects",auth,upload.fields([{name:"video",maxCount:1},{name:"mo
     requireSupabase();
     const b=req.body;
     if(!b.title)return res.status(400).json({error:"Title required"});
-    if(b.type==="video"&&!files.video?.[0])return res.status(400).json({error:"Video file required"});
-    if(b.type==="3d"&&!files.model?.[0])return res.status(400).json({error:"3D model file required"});
+    if(b.type==="video"&&!b.video_url&&!files.video?.[0])return res.status(400).json({error:"Video file required"});
+    if(b.type==="3d"&&!b.model_url&&!files.model?.[0])return res.status(400).json({error:"3D model file required"});
 
-    const videoUrl=b.type==="video"?await uploadToBucket("portfolio-videos",files.video[0]):null;
-    const modelUrl=b.type==="3d"?await uploadToBucket("portfolio-models",files.model[0]):null;
-    const thumbnailUrl=files.thumbnail?.[0]?await uploadToBucket("portfolio-thumbnails",files.thumbnail[0]):null;
+    const videoUrl=b.video_url||(b.type==="video"?await uploadToBucket("portfolio-videos",files.video?.[0]):null);
+    const modelUrl=b.model_url||(b.type==="3d"?await uploadToBucket("portfolio-models",files.model?.[0]):null);
+    const thumbnailUrl=b.thumbnail_url||(files.thumbnail?.[0]?await uploadToBucket("portfolio-thumbnails",files.thumbnail[0]):null);
 
     const p={type:b.type,title:b.title,category:b.category||"",tools:b.tools||"",description:b.description||"",duration:b.duration||"",format:b.format||"",published:true,video_url:videoUrl,model_url:modelUrl,thumbnail_url:thumbnailUrl};
     const {data,error}=await supabase.from("projects").insert(p).select("*").single();
