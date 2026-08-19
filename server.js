@@ -57,8 +57,23 @@ app.get("/api/projects",async(req,res)=>{
   }catch(e){console.error(e);res.status(500).json({error:"Could not load projects"});}
 });
 
-// Creates a short-lived signed URL so large files go directly from the browser to Supabase.
-// This avoids Vercel/serverless request-body limits for large videos and 3D files.
+app.post("/api/profile",auth,async(req,res)=>{
+  try{
+    requireSupabase();
+    const imageUrl=String(req.body?.image_url||"").trim();
+    if(!imageUrl)return res.status(400).json({error:"Profile image required"});
+    const {data:old}=await supabase.from("projects").select("*").eq("type","profile");
+    for(const p of old||[]){
+      const url=p.thumbnail_url;
+      if(url){const marker="/portfolio-thumbnails/";const i=url.indexOf(marker);if(i>=0){const objectPath=url.slice(i+marker.length);try{await supabase.storage.from("portfolio-thumbnails").remove([objectPath])}catch{}}}
+    }
+    await supabase.from("projects").delete().eq("type","profile");
+    const {data,error}=await supabase.from("projects").insert({type:"profile",title:"Profile Photo",published:true,thumbnail_url:imageUrl}).select("*").single();
+    if(error)throw error;
+    res.json(publicProject(data));
+  }catch(e){console.error(e);res.status(500).json({error:"Could not save profile image: "+(e.message||"unknown error")});}
+});
+
 app.post("/api/upload-url",auth,async(req,res)=>{
   try{
     requireSupabase();
